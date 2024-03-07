@@ -6990,8 +6990,7 @@ func TestJetStreamClusterCLFSOnDuplicates(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// Give the stream to be ready.
-	time.Sleep(3 * time.Second)
+	c.waitOnStreamLeader(globalAccountName, streamName)
 
 	var wg sync.WaitGroup
 
@@ -7055,7 +7054,12 @@ func TestJetStreamClusterCLFSOnDuplicates(t *testing.T) {
 			var succeeded bool
 			var failures int
 			for n := 0; n < 10; n++ {
-				_, err := js.Publish("foo", []byte("test"), nats.MsgId(fmt.Sprintf("sync:checking:%d", i)), nats.RetryAttempts(30), nats.AckWait(500*time.Millisecond))
+				_, err := js.Publish(
+					"foo", []byte("test"),
+					nats.MsgId(fmt.Sprintf("sync:checking:%d", i)),
+					nats.RetryAttempts(30),
+					nats.AckWait(500*time.Millisecond),
+				)
 				if err != nil {
 					failures++
 					continue
