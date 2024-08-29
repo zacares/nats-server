@@ -17,6 +17,7 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	crand "crypto/rand"
@@ -42,6 +43,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/s2"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server/sysmem"
 	"github.com/nats-io/nats.go"
@@ -4364,6 +4366,110 @@ func TestJetStreamSnapshotsAPI(t *testing.T) {
 	if !strings.Contains(scResp.Error.Description, expect) {
 		t.Fatalf("Expected description of %q, got %q", expect, scResp.Error.Description)
 	}
+}
+
+func TestJetStreamSnapshotsLimits(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	// Set a max bytes limit on the account. We're going to
+	// deliberately exceed this in the stream snapshot with
+	// extraneous data.
+	acc := s.GlobalAccount()
+	limits := acc.jsLimits
+	tier := limits[_EMPTY_]
+	tier.MaxBytesRequired = true
+	tier.StoreMaxStreamBytes = 5
+	limits[_EMPTY_] = tier
+	require_NoError(t, acc.UpdateJetStreamLimits(limits))
+
+	// Create a stream which matches the max bytes limit.
+	// We aren't going to publish anything into the stream.
+	cfg := &StreamConfig{
+		Name:     "STREAM",
+		Storage:  FileStorage,
+		Subjects: []string{"foo"},
+		MaxBytes: 5,
+	}
+	mset, err := acc.addStream(cfg)
+	require_NoError(t, err)
+
+	nc := clientConnectToServer(t, s)
+	defer nc.Close()
+
+	// Take a snapshot and then prepare to decompress and
+	// de-tar the archive.
+	sr, err := mset.snapshot(5*time.Second, false, true)
+	require_NoError(t, err)
+	s2r := s2.NewReader(sr.Reader)
+	tr := tar.NewReader(s2r)
+
+	// Set up a new buffer for writing our newly modified
+	// snapshot. Then we're going to read everything that's
+	// in the stream snapshot and write it back out to our
+	// new snapshot.
+	var new bytes.Buffer
+	s2w := s2.NewWriter(&new)
+	tw := tar.NewWriter(s2w)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			require_NoError(t, err)
+		}
+
+		require_NoError(t, tw.WriteHeader(hdr))
+		n, err := io.CopyN(tw, tr, hdr.Size)
+		require_NoError(t, err)
+		require_Equal(t, n, hdr.Size)
+	}
+
+	// Now we're going to add a 1GB file full of zeroes into
+	// the snapshot. S2 will compress this down so the snapshot
+	// won't result in a large file, but the contents exceed
+	// the store limits.
+	require_NoError(t, tw.WriteHeader(&tar.Header{
+		Name: "some_filename.txt",
+		Size: 1024 * 1024 * 1024,
+	}))
+	wb := bytes.Repeat([]byte{0}, 1024*1024)
+	for i := 0; i < 1024; i++ {
+		_, err = tw.Write(wb)
+		require_NoError(t, err)
+	}
+	require_NoError(t, tw.Close())
+	require_NoError(t, s2w.Close())
+
+	// Check the size of the snapshot. Expecting a few KB.
+	require_LessThan(t, new.Len(), 32*1024) // 32KB
+
+	// Delete the stream on the server, so we can replace it.
+	require_NoError(t, mset.delete())
+
+	// Now restore the snapshot to disk. Note that this won't
+	// error because even though the files we've written to disk
+	// are large, the stream is effectively "empty" (with no
+	// messages) and therefore the accounting doesn't violate the
+	// account store limit.
+	mset, err = acc.RestoreStream(cfg, &new)
+	require_NoError(t, err)
+
+	// Look up the files that were decompressed onto disk.
+	sd := mset.store.(*fileStore).fileStoreConfig().StoreDir
+	dir, err := os.ReadDir(sd)
+	require_NoError(t, err)
+	sizes := map[string]int64{}
+	for _, f := range dir {
+		info, err := f.Info()
+		require_NoError(t, err)
+		sizes[info.Name()] = info.Size()
+	}
+
+	// The big file that we added into the tar should now be
+	// taking up 1GB on disk.
+	require_Equal(t, sizes["some_filename.txt"], 1024*1024*1024)
 }
 
 func TestJetStreamPubAckPerf(t *testing.T) {
