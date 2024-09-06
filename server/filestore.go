@@ -1689,6 +1689,11 @@ func (fs *fileStore) recoverFullState() (rerr error) {
 			}
 			// Only add in if not empty or the lmb.
 			if mb.msgs > 0 || i == lastIndex {
+				if _, err := os.Stat(mb.mfn); errors.Is(err, os.ErrNotExist) {
+					fs.warn("Stream state encountered internal inconsistency on recover")
+					return errCorruptState
+				}
+
 				fs.addMsgBlock(mb)
 				updateTrackingState(&mstate, mb)
 			} else {
