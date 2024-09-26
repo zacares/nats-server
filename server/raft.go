@@ -3268,7 +3268,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		} else {
 			// Let them know we are the leader.
 			ar := newAppendEntryResponse(n.term, n.pindex, n.id, false)
-			n.debug("AppendEntry ignoring old term from another leader")
+			n.debug("AppendEntry ignoring old term from another leader %d vs %d", ae.term, n.term)
 			n.sendRPC(ae.reply, _EMPTY_, ar.encode(arbuf))
 			arPool.Put(ar)
 		}
@@ -3377,7 +3377,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 	if (isNew && ae.pterm != n.pterm) || ae.pindex != n.pindex {
 		// Check if this is a lower or equal index than what we were expecting.
 		if ae.pindex <= n.pindex {
-			n.debug("AppendEntry detected pindex less than ours: %d:%d vs %d:%d", ae.pterm, ae.pindex, n.pterm, n.pindex)
+			n.debug("AppendEntry detected pindex less than ours: %d:%d (term=%d) vs %d:%d (term=%d)", ae.pterm, ae.pindex, ae.term, n.pterm, n.pindex, n.term)
 			var ar *appendEntryResponse
 
 			var success bool
@@ -3386,6 +3386,8 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 				// So we will ACK back to the leader. This can happen on server restarts based on timings of snapshots.
 				if ae.pterm == n.pterm && !catchingUp {
 					success = true
+				} else if ae.pindex < n.pindex {
+					n.truncateWAL(ae.pterm, ae.pindex)
 				} else {
 					n.resetWAL()
 				}
@@ -3470,7 +3472,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 			return
 
 		} else {
-			n.debug("AppendEntry did not match %d %d with %d %d", ae.pterm, ae.pindex, n.pterm, n.pindex)
+			n.debug("AppendEntry did not match %d:%d (term=%d) vs %d:%d (term=%d)", ae.pterm, ae.pindex, ae.term, n.pterm, n.pindex, n.term)
 			if ae.pindex > n.pindex {
 				// Setup our state for catching up.
 				inbox := n.createCatchup(ae)
