@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"hash"
 	"math"
 	"math/rand"
@@ -31,9 +32,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/internal/fastrand"
-
 	"github.com/minio/highwayhash"
+	"github.com/nats-io/nats-server/v2/internal/fastrand"
 )
 
 type RaftNode interface {
@@ -3215,7 +3215,17 @@ func (n *raft) truncateWAL(term, index uint64) {
 		}
 	}
 	// Set after we know we have truncated properly.
+	previousTerm, previousPterm, previousPindex := n.term, n.pterm, n.pindex
+
 	n.term, n.pterm, n.pindex = term, term, index
+	if n.pindex == 0 {
+		assert.Unreachable("n.pindex got reset", map[string]any{
+			"account": n.accName,
+			"term":    previousTerm,
+			"pterm":   previousPterm,
+			"pindex":  previousPindex,
+		})
+	}
 }
 
 // Reset our WAL. This is equivalent to truncating all data from the log.
@@ -3386,8 +3396,6 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 				// So we will ACK back to the leader. This can happen on server restarts based on timings of snapshots.
 				if ae.pterm == n.pterm && !catchingUp {
 					success = true
-				} else if ae.pindex < n.pindex {
-					n.truncateWAL(ae.pterm, ae.pindex)
 				} else {
 					n.resetWAL()
 				}
