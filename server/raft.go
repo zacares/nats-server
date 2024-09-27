@@ -3397,7 +3397,8 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 				if ae.pterm == n.pterm && !catchingUp {
 					success = true
 				} else {
-					n.resetWAL()
+					// TODO: This will fully nuke our state if we got an outdated ae.pterm/ae.pindex.
+					//n.resetWAL()
 				}
 			} else {
 				// If terms mismatched, or we got an error loading, delete that entry and all others past it.
