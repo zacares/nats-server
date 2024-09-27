@@ -482,9 +482,11 @@ func (s *Server) startRaftNode(accName string, cfg *RaftConfig, labels pprofLabe
 		}
 	} else if n.pterm == 0 && n.pindex == 0 {
 		// We have recovered no state, either through our WAL or snapshots,
-		// so inherit from term from our tav.idx file and pindex from our last sequence.
-		n.pterm = n.term
+		// so inherit from term from our tav.idx file and pindex/commit/applied from our last sequence.
 		n.pindex = state.LastSeq
+		n.pterm = n.term
+		n.commit = state.LastSeq
+		n.applied = state.LastSeq
 	}
 
 	// Make sure to track ourselves.
@@ -1185,7 +1187,7 @@ func (n *raft) installSnapshot(snap *snapshot) error {
 func (n *raft) NeedSnapshot() bool {
 	n.RLock()
 	defer n.RUnlock()
-	return n.snapfile == _EMPTY_ && n.applied > 1
+	return n.snapfile == _EMPTY_ && n.applied > 0
 }
 
 const (
@@ -2706,6 +2708,11 @@ func (n *raft) runCatchup(ar *appendEntryResponse, indexUpdatesQ *ipQueue[uint64
 func (n *raft) sendSnapshotToFollower(subject string) (uint64, error) {
 	snap, err := n.loadLastSnapshot()
 	if err != nil {
+		if n.NeedSnapshot() {
+			// Just return error and don't reset WAL.
+			// We need a snapshot, so we should rely on it to be installed to unblock us.
+			return 0, err
+		}
 		// We need to stepdown here when this happens.
 		n.stepdownLocked(noLeader)
 		// We need to reset our state here as well.
