@@ -2688,6 +2688,7 @@ func (s *Server) closeWebsocketServer() int {
 // WaitForShutdown will block until the server has been fully shutdown.
 func (s *Server) WaitForShutdown() {
 	<-s.shutdownComplete
+	s.Errorf("shutdown complete")
 }
 
 // AcceptLoop is exported for easier testing.
@@ -4358,6 +4359,7 @@ func (s *Server) lameDuckMode() {
 		}
 	}
 	s.Shutdown()
+	s.Errorf("lame duck shutdown")
 	s.WaitForShutdown()
 }
 

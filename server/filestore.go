@@ -5936,6 +5936,7 @@ func (mb *msgBlock) indexCacheBuf(buf []byte) error {
 
 	lbuf := uint32(len(buf))
 	var seq uint64
+	var pseq uint64
 	for index < lbuf {
 		if index+msgHdrSize > lbuf {
 			return errCorruptState
@@ -5965,6 +5966,14 @@ func (mb *msgBlock) indexCacheBuf(buf []byte) error {
 		// Clear any erase bits.
 		erased := seq&ebit != 0
 		seq = seq &^ ebit
+
+		if seq <= pseq {
+			// TODO: skip, we got a duplicate message?
+			//index += rl
+			//continue
+			mb.fs.warn("got duplicate sequence %d", seq)
+		}
+		pseq = seq
 
 		// We defer checksum checks to individual msg cache lookups to amortorize costs and
 		// not introduce latency for first message from a newly loaded block.

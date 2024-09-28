@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -2952,6 +2954,11 @@ func (mset *stream) resetClusteredState(err error) bool {
 	}
 
 	if node != nil {
+		stack := debug.Stack()
+		assert.Reachable("staging RAFT shutdown/delete", map[string]any{
+			"err": err,
+			"stack":   string(stack),
+		})
 		if errors.Is(err, errCatchupAbortedNoLeader) || err == errCatchupTooManyRetries {
 			// Don't delete all state, could've just been temporarily unable to reach the leader.
 			node.Stop()
@@ -3086,6 +3093,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 					mt = mset.getAndDeleteMsgTrace(lseq)
 				}
 				// Process the actual message here.
+				s.Debugf("processJetStreamMsg: subject=%s, lseq=%d", subject, lseq)
 				err = mset.processJetStreamMsg(subject, reply, hdr, msg, lseq, ts, mt)
 
 				// If we have inflight make sure to clear after processing.
@@ -3110,6 +3118,7 @@ func (js *jetStream) applyStreamEntries(mset *stream, ce *CommittedEntry, isReco
 							mset.store.Compact(lseq + 1)
 							// Retry
 							err = mset.processJetStreamMsg(subject, reply, hdr, msg, lseq, ts, mt)
+							s.Errorf("compacted to lseq+1=%d and retried: %v, subject=%s", lseq+1, err, subject)
 						}
 						// FIXME(dlc) - We could just run a catchup with a request defining the span between what we expected
 						// and what we got.
@@ -8139,6 +8148,7 @@ func (mset *stream) processClusteredInboundMsg(subject, reply string, hdr, msg [
 		// Re-capture
 		lseq = mset.lastSeq()
 		mset.clseq = lseq + mset.clfs
+		mset.srv.Noticef("initialized %s at clseq=%d", mset.cfg.Name, mset.clseq)
 	}
 
 	// Check if we have an interest policy and discard new with max msgs or bytes.
@@ -8407,6 +8417,8 @@ func (mset *stream) processSnapshot(snap *StreamReplicatedState) (e error) {
 	var state StreamState
 	mset.store.FastState(&state)
 	sreq := mset.calculateSyncRequest(&state, snap)
+
+	mset.srv.Warnf("[%s] processSnapshot %v vs %v (%v)", mset.cfg.Name, snap, state, sreq)
 
 	s, js, subject, n, st := mset.srv, mset.js, mset.sa.Sync, mset.node, mset.cfg.Storage
 	qname := fmt.Sprintf("[ACC:%s] stream '%s' snapshot", mset.acc.Name, mset.cfg.Name)

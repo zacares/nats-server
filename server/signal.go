@@ -51,6 +51,7 @@ func (s *Server) handleSignals() {
 				switch sig {
 				case syscall.SIGINT:
 					s.Shutdown()
+					s.Errorf("SIGINT")
 					s.WaitForShutdown()
 					os.Exit(0)
 				case syscall.SIGTERM:
@@ -61,6 +62,7 @@ func (s *Server) handleSignals() {
 
 					if !ldm {
 						s.Shutdown()
+						s.Errorf("SIGTERM")
 						s.WaitForShutdown()
 						os.Exit(1)
 					}

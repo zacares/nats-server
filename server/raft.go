@@ -1145,7 +1145,7 @@ func (n *raft) InstallSnapshot(data []byte) error {
 		term = ae.term
 	}
 
-	n.debug("Installing snapshot of %d bytes", len(data))
+	n.debug("Installing snapshot of %d bytes (n.applied=%d)", len(data), n.applied)
 
 	return n.installSnapshot(&snapshot{
 		lastTerm:  term,
@@ -3251,7 +3251,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		} else {
 			// Let them know we are the leader.
 			ar := newAppendEntryResponse(n.term, n.pindex, n.id, false)
-			n.debug("AppendEntry ignoring old term from another leader")
+			n.debug("AppendEntry ignoring old term from another leader (n.term=%d, n.pindex=%d, ae.term=%d, ae.pterm=%d, ae.pindex=%d)", n.term, n.pindex, ae.term, ae.pterm, ae.pindex)
 			n.sendRPC(ae.reply, _EMPTY_, ar.encode(arbuf))
 			arPool.Put(ar)
 		}
@@ -3360,22 +3360,25 @@ RETRY:
 	if ae.pterm != n.pterm || ae.pindex != n.pindex {
 		// Check if this is a lower or equal index than what we were expecting.
 		if ae.pindex <= n.pindex {
-			n.debug("AppendEntry detected pindex less than/equal to ours: %d:%d vs %d:%d", ae.pterm, ae.pindex, n.pterm, n.pindex)
+			n.debug("AppendEntry detected pindex less than/equal to ours: %d:%d vs %d:%d (commit=%d)", ae.pterm, ae.pindex, n.pterm, n.pindex, n.commit)
 			var ar *appendEntryResponse
 			var success bool
 
 			if ae.pindex < n.commit {
 				// If we have already committed this entry, just mark success.
+				n.error("marking as success (commit), isNew=%v, catchingUp=%v, ae.pterm=%d, ae.pindex=%d, n.pterm=%d, n.pindex=%d, n.commit=%d", isNew, catchingUp, ae.pterm, ae.pindex, n.pterm, n.pindex, n.commit)
 				success = true
 			} else if eae, _ := n.loadEntry(ae.pindex); eae == nil {
 				// If terms are equal, and we are not catching up, we have simply already processed this message.
 				// So we will ACK back to the leader. This can happen on server restarts based on timings of snapshots.
 				if ae.pterm == n.pterm && !catchingUp {
+					n.error("marking as success, isNew=%v, catchingUp=%v, ae.pterm=%d, ae.pindex=%d, n.pterm=%d, n.pindex=%d, n.commit=%d", isNew, catchingUp, ae.pterm, ae.pindex, n.pterm, n.pindex, n.commit)
 					success = true
 				} else if ae.pindex == n.pindex {
 					// Check if only our terms do not match here.
 					// Make sure pterms match and we take on the leader's.
 					// This prevents constant spinning.
+					n.error("truncating based on equal pindex")
 					n.truncateWAL(ae.pterm, ae.pindex)
 				} else {
 					n.resetWAL()
@@ -3388,6 +3391,7 @@ RETRY:
 				// If terms mismatched, delete that entry and all others past it.
 				// Make sure to cancel any catchups in progress.
 				// Truncate will reset our pterm and pindex. Only do so if we have an entry.
+				n.error("truncate to %d %d (isNew=%v, catchingUp=%v, ae=%v, pterm=%d, pindex=%d, commit=%d)", eae.pterm, eae.pindex, isNew, catchingUp, ae, n.pterm, n.pindex, n.commit)
 				n.truncateWAL(eae.pterm, eae.pindex)
 			}
 			// Cancel regardless if unsuccessful.
@@ -3472,6 +3476,7 @@ RETRY:
 		// Only store if an original which will have sub != nil
 		if sub != nil {
 			if err := n.storeToWAL(ae); err != nil {
+				n.debug("processAppendEntry, storeToWAL error, %v", err)
 				if err != ErrStoreClosed {
 					n.warn("Error storing entry to WAL: %v", err)
 				}
@@ -3489,6 +3494,7 @@ RETRY:
 				n.debug("Not saving to append entries pending")
 			}
 		} else {
+			n.debug("processAppendEntry replay on startup, n.pterm=%d, n.pindex=%d, ae.term=%d, ae.pindex+1=%d", n.pterm, n.pindex, ae.term, ae.pindex+1)
 			// This is a replay on startup so just take the appendEntry version.
 			n.pterm = ae.term
 			n.pindex = ae.pindex + 1
@@ -3637,6 +3643,7 @@ func (n *raft) storeToWAL(ae *appendEntry) error {
 	if ae == nil {
 		return fmt.Errorf("raft: Missing append entry for storage")
 	}
+	n.debug("storeToWAL (n.pterm=%d, n.pindex=%d, ae.commit=%d, ae.term=%d, ae.pterm=%d, ae.pindex=%d)", n.pterm, n.pindex, ae.commit, ae.term, ae.pterm, ae.pindex)
 	if n.werr != nil {
 		return n.werr
 	}
@@ -3686,6 +3693,7 @@ func (n *raft) sendAppendEntry(entries []*Entry) {
 	shouldStore := ae.shouldStore()
 	if shouldStore {
 		if err := n.storeToWAL(ae); err != nil {
+			n.debug("sendAppendEntry, storeToWAL error, %v", err)
 			return
 		}
 		// We count ourselves.
@@ -4051,7 +4059,11 @@ func (n *raft) processVoteRequest(vr *voteRequest) error {
 
 	// Only way we get to yes is through here.
 	voteOk := n.vote == noVote || n.vote == vr.candidate
+	n.debug("processVoteRequest, granted? %t && (%d > %d || %d == %d && %d >= %d)", voteOk, vr.lastTerm, n.pterm, vr.lastTerm, n.pterm, vr.lastIndex, n.pindex)
 	if voteOk && (vr.lastTerm > n.pterm || vr.lastTerm == n.pterm && vr.lastIndex >= n.pindex) {
+		if vr.lastIndex < n.pindex {
+			n.error("vote for leader with less entries %d %d vs %d %d", vr.lastTerm, vr.lastIndex, n.pterm, n.pindex)
+		}
 		vresp.granted = true
 		n.term = vr.term
 		n.vote = vr.candidate
