@@ -5141,3 +5141,151 @@ func TestJetStreamClusterExpectedPerSubjectConsistency(t *testing.T) {
 	require_Len(t, len(mset.expectedPerSubjectSequence), 0)
 	require_Len(t, len(mset.expectedPerSubjectInProcess), 0)
 }
+
+func TestJetStreamClusterDesyncAfterResetStorage(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	si, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	streamLeader := si.Cluster.Leader
+	streamLeaderServer := c.serverByName(streamLeader)
+	nc.Close()
+	nc, js = jsClientConnect(t, streamLeaderServer)
+	defer nc.Close()
+
+	servers := slices.DeleteFunc([]string{"S-1", "S-2", "S-3"}, func(s string) bool {
+		return s == streamLeader
+	})
+
+	// Publish 10 messages.
+	for i := 0; i < 10; i++ {
+		pubAck, err := js.Publish("foo", []byte("ok"))
+		require_NoError(t, err)
+		require_Equal(t, pubAck.Sequence, uint64(i+1))
+	}
+
+	outdatedServerName := servers[0]
+	resetServerName := servers[1]
+
+	outdatedServer := c.serverByName(outdatedServerName)
+	outdatedServer.Shutdown()
+	outdatedServer.WaitForShutdown()
+
+	// Publish 10 more messages, one server will be behind.
+	for i := 0; i < 10; i++ {
+		pubAck, err := js.Publish("foo", []byte("ok"))
+		require_NoError(t, err)
+		require_Equal(t, pubAck.Sequence, uint64(i+11))
+	}
+
+	// We will not need the client anymore.
+	nc.Close()
+
+	// Shutdown stream leader so one server remains.
+	streamLeaderServer.Shutdown()
+	streamLeaderServer.WaitForShutdown()
+
+	// Reset the storage of one server.
+	// This might be done for a variety of reasons:
+	// server is desynced/corrupted, machine is renewed but the same name is kept, RAFT state deleted, etc.
+	resetServer := c.serverByName(resetServerName)
+	sd := resetServer.StoreDir()
+	resetServer.Shutdown()
+	resetServer.WaitForShutdown()
+	err = os.RemoveAll(sd)
+	require_NoError(t, err)
+	c.restartServer(resetServer)
+
+	// Stream leader stays offline for now, we only start the server with missing stream data.
+	// We expect that the reset server must not allow the outdated server to become leader, as that would result in desync.
+	c.restartServer(outdatedServer)
+
+	// Both outdated and reset server must NOT become the leader.
+	// As the reset server must NOT be allowed to make voting decisions while it's reset.
+	time.Sleep(5 * time.Second)
+	electedLeader := c.streamLeader(globalAccountName, "TEST")
+	require_True(t, electedLeader == nil)
+
+	// Start the previous stream leader again, this MUST become leader again as it's most up-to-date.
+	c.restartServer(streamLeaderServer)
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+	electedLeader = c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, electedLeader)
+	require_Equal(t, electedLeader.Name(), streamLeaderServer.Name())
+}
+
+func TestJetStreamClusterDesyncAfterResetStorageForQuorumOfServers(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	si, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+	})
+	require_NoError(t, err)
+
+	streamLeader := si.Cluster.Leader
+	streamLeaderServer := c.serverByName(streamLeader)
+	nc.Close()
+	nc, js = jsClientConnect(t, streamLeaderServer)
+	defer nc.Close()
+
+	servers := slices.DeleteFunc([]string{"S-1", "S-2", "S-3"}, func(s string) bool {
+		return s == streamLeader
+	})
+
+	// Publish 10 messages.
+	for i := 0; i < 10; i++ {
+		pubAck, err := js.Publish("foo", []byte("ok"))
+		require_NoError(t, err)
+		require_Equal(t, pubAck.Sequence, uint64(i+1))
+	}
+
+	resetServerName1 := servers[0]
+	resetServerName2 := servers[1]
+	resetServer1 := c.serverByName(resetServerName1)
+	resetServer2 := c.serverByName(resetServerName2)
+	sd1 := resetServer1.StoreDir()
+	sd2 := resetServer2.StoreDir()
+
+	// Stop the whole cluster
+	c.stopAll()
+
+	// Reset the storage of two servers.
+	// This might be because two server's machines/disks were reset.
+	err = os.RemoveAll(sd1)
+	require_NoError(t, err)
+	err = os.RemoveAll(sd2)
+	require_NoError(t, err)
+
+	// Stream leader stays offline for now, we only start the servers with missing stream data.
+	// We expect that the reset servers must not allow each other to become leader, as that would result in desync.
+	c.restartServer(resetServer1)
+	c.restartServer(resetServer2)
+
+	// Both outdated and reset server must NOT become the leader.
+	// As the reset server must NOT be allowed to make voting decisions while it's reset.
+	time.Sleep(5 * time.Second)
+	electedLeader := c.streamLeader(globalAccountName, "TEST")
+	require_True(t, electedLeader == nil)
+
+	// Start the previous stream leader again, this MUST become leader again as it's most up-to-date.
+	c.restartServer(streamLeaderServer)
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+	electedLeader = c.streamLeader(globalAccountName, "TEST")
+	require_NotNil(t, electedLeader)
+	require_Equal(t, electedLeader.Name(), streamLeaderServer.Name())
+}

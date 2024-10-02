@@ -3080,6 +3080,7 @@ func (n *raft) runAsCandidate() {
 	votes := map[string]struct{}{
 		n.ID(): {},
 	}
+	pindexTracking := map[string]uint64{}
 
 	for n.State() == Candidate {
 		elect := n.electTimer()
@@ -3107,13 +3108,45 @@ func (n *raft) runAsCandidate() {
 			}
 			n.RLock()
 			nterm := n.term
+			npindex := n.pindex
+			ncsz := n.csz
 			n.RUnlock()
 
-			if vresp.granted && nterm == vresp.term {
-				// only track peers that would be our followers
-				n.trackPeer(vresp.peer)
-				votes[vresp.peer] = struct{}{}
-				if n.wonElection(len(votes)) {
+			if nterm == vresp.term {
+				if vresp.pindexSet {
+					pindexTracking[vresp.peer] = vresp.pindex
+				} else {
+					// TODO: docs, not supported yet, assume same pindex
+					pindexTracking[vresp.peer] = npindex
+				}
+
+				if vresp.granted {
+					// only track peers that would be our followers
+					n.trackPeer(vresp.peer)
+					if !vresp.pindexSet || vresp.pindex > 0 {
+						votes[vresp.peer] = struct{}{}
+					}
+				}
+
+				// Either we win with a quorum.
+				won := n.wonElection(len(votes))
+
+				// Or we have received votes from everyone, and we're sure we're most up-to-date.
+				if !won && len(pindexTracking)+1 >= ncsz {
+					var bail bool
+					for _, peerPindex := range pindexTracking {
+						if peerPindex > npindex {
+							// Peer is ahead compared with us, bail.
+							bail = true
+							break
+						}
+					}
+					if !bail {
+						won = true
+					}
+				}
+
+				if won {
 					// Become LEADER if we have won and gotten a quorum with everyone we should hear from.
 					n.switchToLeader()
 					return
@@ -4013,12 +4046,15 @@ func (n *raft) writeTermVote() {
 
 // voteResponse is a response to a vote request.
 type voteResponse struct {
-	term    uint64
-	peer    string
-	granted bool
+	term      uint64
+	peer      string
+	granted   bool
+	pindex    uint64
+	pindexSet bool
 }
 
-const voteResponseLen = 8 + 8 + 1
+const minVoteResponseLen = 8 + 8 + 1
+const voteResponseLen = minVoteResponseLen + 8
 
 func (vr *voteResponse) encode() []byte {
 	var buf [voteResponseLen]byte
@@ -4030,16 +4066,21 @@ func (vr *voteResponse) encode() []byte {
 	} else {
 		buf[16] = 0
 	}
+	le.PutUint64(buf[17:], vr.pindex)
 	return buf[:voteResponseLen]
 }
 
 func decodeVoteResponse(msg []byte) *voteResponse {
-	if len(msg) != voteResponseLen {
+	if len(msg) != minVoteResponseLen && len(msg) != voteResponseLen {
 		return nil
 	}
 	var le = binary.LittleEndian
 	vr := &voteResponse{term: le.Uint64(msg[0:]), peer: string(msg[8:16])}
 	vr.granted = msg[16] == 1
+	if len(msg) == voteResponseLen {
+		vr.pindex = le.Uint64(msg[17:])
+		vr.pindexSet = true
+	}
 	return vr
 }
 
@@ -4073,7 +4114,7 @@ func (n *raft) processVoteRequest(vr *voteRequest) error {
 
 	n.Lock()
 
-	vresp := &voteResponse{n.term, n.id, false}
+	vresp := &voteResponse{n.term, n.id, false, n.pindex, true}
 	defer n.debug("Sending a voteResponse %+v -> %q", vresp, vr.reply)
 
 	// Ignore if we are newer. This is important so that we don't accidentally process
