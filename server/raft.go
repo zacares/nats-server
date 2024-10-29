@@ -70,6 +70,7 @@ type RaftNode interface {
 	ApplyQ() *ipQueue[*CommittedEntry]
 	PauseApply() error
 	ResumeApply()
+	ClearInflightSnapshot()
 	LeadChangeC() <-chan bool
 	QuitC() <-chan struct{}
 	Created() time.Time
@@ -199,6 +200,8 @@ type raft struct {
 	paused    bool   // Whether or not applies are paused
 	hcommit   uint64 // The commit at the time that applies were paused
 	pobserver bool   // Whether we were an observer at the time that applies were paused
+
+	inflightSnapshot bool // Indicates a snapshot is inflight, i.e. it's in the apply queue. Blocks us from becoming candidate.
 
 	prop  *ipQueue[*Entry]               // Proposals
 	entry *ipQueue[*appendEntry]         // Append entries
@@ -1039,6 +1042,13 @@ func (n *raft) ResumeApply() {
 	}
 }
 
+// ClearInflightSnapshot resets flag of a snapshot being inflight.
+func (n *raft) ClearInflightSnapshot() {
+	n.Lock()
+	defer n.Unlock()
+	n.inflightSnapshot = false
+}
+
 // Applied is a callback that must be called by the upper layer when it
 // has successfully applied the committed entries that it received from the
 // apply queue. It will return the number of entries and an estimation of the
@@ -1285,6 +1295,7 @@ func (n *raft) setupLastSnapshot() {
 	n.commit = snap.lastIndex
 	n.applied = snap.lastIndex
 	n.apply.push(newCommittedEntry(n.commit, []*Entry{{EntrySnapshot, snap.data}}))
+	n.inflightSnapshot = true
 	if _, err := n.wal.Compact(snap.lastIndex + 1); err != nil {
 		n.setWriteErrLocked(err)
 	}
@@ -3482,6 +3493,7 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 
 			// Now send snapshot to upper levels. Only send the snapshot, not the peerstate entry.
 			n.apply.push(newCommittedEntry(n.commit, ae.entries[:1]))
+			n.inflightSnapshot = true
 			n.Unlock()
 			return
 		}
@@ -4242,7 +4254,8 @@ func (n *raft) switchToCandidate() {
 	defer n.Unlock()
 
 	// If we are catching up or are in observer mode we can not switch.
-	if n.observer || n.paused {
+	// Or we're a follower and are about to or actively processing a snapshot.
+	if n.observer || n.paused || n.inflightSnapshot {
 		return
 	}
 

@@ -1546,6 +1546,11 @@ func (js *jetStream) metaSnapshot() []byte {
 }
 
 func (js *jetStream) applyMetaSnapshot(buf []byte, ru *recoveryUpdates, isRecovering bool) error {
+	// We're about to process the snapshot, we can clear inflight status early.
+	if mg := js.getMetaGroup(); mg != nil {
+		mg.ClearInflightSnapshot()
+	}
+
 	var wsas []writeableStreamAssignment
 	if len(buf) > 0 {
 		jse, err := s2.Decode(nil, buf)
@@ -4959,6 +4964,11 @@ func (js *jetStream) applyConsumerEntries(o *consumer, ce *CommittedEntry, isLea
 	for _, e := range ce.Entries {
 		if e.Type == EntrySnapshot {
 			if !isLeader {
+				// We're about to process the snapshot, we can clear inflight status early.
+				if n := o.node; n != nil {
+					n.ClearInflightSnapshot()
+				}
+
 				// No-op needed?
 				state, err := decodeConsumerState(e.Data)
 				if err != nil {
@@ -8286,6 +8296,14 @@ func (mset *stream) processSnapshot(snap *StreamReplicatedState) (e error) {
 	s, js, subject, n, st := mset.srv, mset.js, mset.sa.Sync, mset.node, mset.cfg.Storage
 	qname := fmt.Sprintf("[ACC:%s] stream '%s' snapshot", mset.acc.Name, mset.cfg.Name)
 	mset.mu.Unlock()
+
+	defer func() {
+		// Only clear inflight if successful, or we're not going to reset cluster state.
+		// Otherwise, we don't want to become candidate/leader for the stream while resetting cluster state.
+		if e == nil || !isClusterResetErr(e) {
+			n.ClearInflightSnapshot()
+		}
+	}()
 
 	// Bug that would cause this to be empty on stream update.
 	if subject == _EMPTY_ {
