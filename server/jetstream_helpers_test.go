@@ -2011,9 +2011,9 @@ func checkState(t *testing.T, c *cluster, accountName, streamName string) error 
 			errs = append(errs, err)
 		}
 		if state.NumDeleted != streamLeader.State.NumDeleted {
-			err := fmt.Errorf("[%s] Leader %v NumDeleted is %d, Follower %v is at %d\nSTATE_A: %+v\nSTATE_B: %+v\n",
+			err := fmt.Errorf("[%s] Leader %v NumDeleted is %d, Follower %v is at %d",
 				streamName, leaderSrv, streamLeader.State.NumDeleted,
-				srv, state.NumDeleted, streamLeader.State, state,
+				srv, state.NumDeleted,
 			)
 			errs = append(errs, err)
 		}

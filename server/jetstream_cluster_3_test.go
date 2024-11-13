@@ -6288,48 +6288,9 @@ Setup:
 		}
 	}
 
-	getStreamDetails := func(t *testing.T, srv *Server) *StreamDetail {
-		t.Helper()
-		jsz, err := srv.Jsz(&JSzOptions{Accounts: true, Streams: true, Consumer: true})
-		require_NoError(t, err)
-		if len(jsz.AccountDetails) > 0 && len(jsz.AccountDetails[0].Streams) > 0 {
-			details := jsz.AccountDetails[0]
-			stream := details.Streams[0]
-			return &stream
-		}
-		t.Error("Could not find account details")
-		return nil
-	}
-	checkState := func(t *testing.T) error {
-		t.Helper()
-
-		leaderSrv := c.streamLeader("js", "LTEST")
-		streamLeader := getStreamDetails(t, leaderSrv)
-		// t.Logf("Stream Leader: %+v", streamLeader.State)
-		errs := make([]error, 0)
-		for _, srv := range c.servers {
-			if srv == leaderSrv {
-				// Skip self
-				continue
-			}
-			stream := getStreamDetails(t, srv)
-			if stream.State.Msgs != streamLeader.State.Msgs {
-				err := fmt.Errorf("Leader %v has %d messages, Follower %v has %d messages",
-					stream.Cluster.Leader, streamLeader.State.Msgs,
-					srv.Name(), stream.State.Msgs,
-				)
-				errs = append(errs, err)
-			}
-		}
-		if len(errs) > 0 {
-			return errors.Join(errs...)
-		}
-		return nil
-	}
-
 	// Confirm state of the leader.
 	leaderSrv := c.streamLeader("js", "LTEST")
-	streamLeader := getStreamDetails(t, leaderSrv)
+	streamLeader := getStreamDetails(t, c, "js", "LTEST")
 	if streamLeader.State.Msgs != received {
 		t.Errorf("Leader %v has %d messages stored but %d messages were received (delta: %d)",
 			leaderSrv.Name(), streamLeader.State.Msgs, received, received-streamLeader.State.Msgs)
@@ -6348,7 +6309,7 @@ Setup:
 	)
 Check:
 	for range time.NewTicker(1 * time.Second).C {
-		lastErr = checkState(t)
+		lastErr = checkState(t, c, "js", "LTEST")
 		if attempts > 5 {
 			break Check
 		}

@@ -1152,68 +1152,9 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			consumerPending += int(ci.NumPending)
 		}
 
-		getStreamDetails := func(t *testing.T, srv *Server) *StreamDetail {
-			t.Helper()
-			jsz, err := srv.Jsz(&JSzOptions{Accounts: true, Streams: true, Consumer: true})
-			require_NoError(t, err)
-			if len(jsz.AccountDetails) > 0 && len(jsz.AccountDetails[0].Streams) > 0 {
-				stream := jsz.AccountDetails[0].Streams[0]
-				return &stream
-			}
-			t.Error("Could not find account details")
-			return nil
-		}
-
-		checkState := func(t *testing.T) error {
-			t.Helper()
-
-			leaderSrv := c.streamLeader("js", sc.Name)
-			if leaderSrv == nil {
-				return fmt.Errorf("no leader found for stream")
-			}
-			streamLeader := getStreamDetails(t, leaderSrv)
-			var errs []error
-			for _, srv := range c.servers {
-				if srv == leaderSrv {
-					// Skip self
-					continue
-				}
-				stream := getStreamDetails(t, srv)
-				if stream == nil {
-					return fmt.Errorf("stream not found")
-				}
-
-				if stream.State.Msgs != streamLeader.State.Msgs {
-					err := fmt.Errorf("Leader %v has %d messages, Follower %v has %d messages",
-						stream.Cluster.Leader, streamLeader.State.Msgs,
-						srv, stream.State.Msgs,
-					)
-					errs = append(errs, err)
-				}
-				if stream.State.FirstSeq != streamLeader.State.FirstSeq {
-					err := fmt.Errorf("Leader %v FirstSeq is %d, Follower %v is at %d",
-						stream.Cluster.Leader, streamLeader.State.FirstSeq,
-						srv, stream.State.FirstSeq,
-					)
-					errs = append(errs, err)
-				}
-				if stream.State.LastSeq != streamLeader.State.LastSeq {
-					err := fmt.Errorf("Leader %v LastSeq is %d, Follower %v is at %d",
-						stream.Cluster.Leader, streamLeader.State.LastSeq,
-						srv, stream.State.LastSeq,
-					)
-					errs = append(errs, err)
-				}
-			}
-			if len(errs) > 0 {
-				return errors.Join(errs...)
-			}
-			return nil
-		}
-
 		checkMsgsEqual := func(t *testing.T) {
 			// These have already been checked to be the same for all streams.
-			state := getStreamDetails(t, c.streamLeader("js", sc.Name)).State
+			state := getStreamDetails(t, c, "js", sc.Name).State
 			// Gather all the streams.
 			var msets []*stream
 			for _, s := range c.servers {
@@ -1256,7 +1197,7 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 		if sc.Replicas > 1 {
 			// If we have drifted do not have to wait too long, usually its stuck for good.
 			checkFor(t, time.Minute, time.Second, func() error {
-				return checkState(t)
+				return checkState(t, c, "js", sc.Name)
 			})
 			// If we succeeded now let's check that all messages are also the same.
 			// We may have no messages but for tests that do we make sure each msg is the same
@@ -1907,23 +1848,6 @@ func TestJetStreamClusterBusyStreams(t *testing.T) {
 	}
 	stepDown := func(nc *nats.Conn, streamName string) {
 		nc.Request(fmt.Sprintf(JSApiStreamLeaderStepDownT, streamName), nil, time.Second)
-	}
-	getStreamDetails := func(t *testing.T, c *cluster, accountName, streamName string) *StreamDetail {
-		t.Helper()
-		srv := c.streamLeader(accountName, streamName)
-		jsz, err := srv.Jsz(&JSzOptions{Accounts: true, Streams: true, Consumer: true})
-		require_NoError(t, err)
-		for _, acc := range jsz.AccountDetails {
-			if acc.Name == accountName {
-				for _, stream := range acc.Streams {
-					if stream.Name == streamName {
-						return &stream
-					}
-				}
-			}
-		}
-		t.Error("Could not find account details")
-		return nil
 	}
 	checkMsgsEqual := func(t *testing.T, c *cluster, accountName, streamName string) {
 		state := getStreamDetails(t, c, accountName, streamName).State
