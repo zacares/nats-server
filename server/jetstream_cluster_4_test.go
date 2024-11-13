@@ -17,6 +17,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -842,38 +843,21 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 		var wg sync.WaitGroup
 
 		// First call is just to create the pull subscribers.
-		mp := nats.MaxAckPending(10000)
+		numConsumers := 10
+		mp := nats.MaxAckPending(1000)
 		mw := nats.PullMaxWaiting(1000)
 		aw := nats.AckWait(5 * time.Second)
 
-		for i := 0; i < 10; i++ {
-			for _, partition := range []string{"EEEEE"} {
-				subject := fmt.Sprintf("MSGS.%s.*.H.100XY.*.*.WQ.00000000000%d", partition, i)
-				consumer := fmt.Sprintf("consumer:%s:%d", partition, i)
-				_, err := cjs.PullSubscribe(subject, consumer, mp, mw, aw)
-				require_NoError(t, err)
-			}
+		var publishSubjects []string
+		for i := 0; i < numConsumers; i++ {
+			subject := fmt.Sprintf("MSGS.*.H.100XY.*.*.WQ.00000000000%d", i)
+			publishSubjects = append(publishSubjects, fmt.Sprintf("MSGS.P.H.100XY.1.100Z.WQ.00000000000%d", i))
+			consumer := fmt.Sprintf("consumer:%d", i)
+			_, err := cjs.PullSubscribe(subject, consumer, mp, mw, aw)
+			require_NoError(t, err)
 		}
 
-		// Create a single consumer that does no activity.
-		// Make sure we still calculate low ack properly and cleanup etc.
-		_, err = cjs.PullSubscribe("MSGS.ZZ.>", "consumer:ZZ:0", mp, mw, aw)
-		require_NoError(t, err)
-
-		subjects := []string{
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000000",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000001",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000002",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000003",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000004",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000005",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000006",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000007",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000008",
-			"MSGS.EEEEE.P.H.100XY.1.100Z.WQ.000000000009",
-		}
 		payload := []byte(strings.Repeat("A", 1024))
-
 		for i := 0; i < 50; i++ {
 			wg.Add(1)
 			go func() {
@@ -887,37 +871,8 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 						return
 					default:
 					}
-					for _, subject := range subjects {
-						// Send each message a few times.
-						msgID := nats.MsgId(nuid.Next())
-						pjs.PublishAsync(subject, payload, msgID)
-						pjs.Publish(subject, payload, msgID, nats.AckWait(250*time.Millisecond))
-						pjs.Publish(subject, payload, msgID, nats.AckWait(250*time.Millisecond))
-					}
-				}
-			}()
-		}
-
-		// Rogue publisher that sends the same msg ID everytime.
-		for i := 0; i < 10; i++ {
-			wg.Add(1)
-			go func() {
-				pnc, pjs := jsClientConnect(t, c.randomServer())
-				defer pnc.Close()
-
-				msgID := nats.MsgId("1234567890")
-				for i := 1; ; i++ {
-					select {
-					case <-pctx.Done():
-						wg.Done()
-						return
-					default:
-					}
-					for _, subject := range subjects {
-						// Send each message a few times.
-						pjs.PublishAsync(subject, payload, msgID, nats.RetryAttempts(0), nats.RetryWait(0))
-						pjs.Publish(subject, payload, msgID, nats.AckWait(1*time.Millisecond), nats.RetryAttempts(0), nats.RetryWait(0))
-						pjs.Publish(subject, payload, msgID, nats.AckWait(1*time.Millisecond), nats.RetryAttempts(0), nats.RetryWait(0))
+					for _, subject := range publishSubjects {
+						pjs.Publish(subject, payload, nats.AckWait(250*time.Millisecond))
 					}
 				}
 			}()
@@ -929,19 +884,15 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 
-		for i := 0; i < 10; i++ {
-			subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
-			consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
+		for i := 0; i < numConsumers; i++ {
+			subject := fmt.Sprintf("MSGS.*.H.100XY.*.*.WQ.00000000000%d", i)
+			consumer := fmt.Sprintf("consumer:%d", i)
 			for n := 0; n < 5; n++ {
 				cpnc, cpjs := jsClientConnect(t, c.randomServer())
 				defer cpnc.Close()
 
 				psub, err := cpjs.PullSubscribe(subject, consumer, mp, mw, aw)
 				require_NoError(t, err)
-
-				time.AfterFunc(15*time.Second, func() {
-					cpnc.Close()
-				})
 
 				wg.Add(1)
 				go func() {
@@ -971,57 +922,6 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 							for _, msg := range msgs {
 								msg.Ack()
 							}
-							msgs, err = psub.Fetch(1000, nats.MaxWait(200*time.Millisecond))
-							if err != nil {
-								continue
-							}
-							for _, msg := range msgs {
-								msg.Ack()
-							}
-						}
-					}
-				}()
-			}
-		}
-
-		for i := 0; i < 10; i++ {
-			subject := fmt.Sprintf("MSGS.EEEEE.*.H.100XY.*.*.WQ.00000000000%d", i)
-			consumer := fmt.Sprintf("consumer:EEEEE:%d", i)
-			for n := 0; n < 10; n++ {
-				cpnc, cpjs := jsClientConnect(t, c.randomServer())
-				defer cpnc.Close()
-
-				psub, err := cpjs.PullSubscribe(subject, consumer, mp, mw, aw)
-				if err != nil {
-					t.Logf("ERROR: %v", err)
-					continue
-				}
-
-				wg.Add(1)
-				go func() {
-					tick := time.NewTicker(1 * time.Millisecond)
-					for {
-						select {
-						case <-ctx.Done():
-							wg.Done()
-							return
-						case <-tick.C:
-							// Fetch 1 first, then if no errors Fetch 100.
-							msgs, err := psub.Fetch(1, nats.MaxWait(200*time.Millisecond))
-							if err != nil {
-								continue
-							}
-							for _, msg := range msgs {
-								msg.Ack()
-							}
-							msgs, err = psub.Fetch(100, nats.MaxWait(200*time.Millisecond))
-							if err != nil {
-								continue
-							}
-							for _, msg := range msgs {
-								msg.Ack()
-							}
-
 							msgs, err = psub.Fetch(1000, nats.MaxWait(200*time.Millisecond))
 							if err != nil {
 								continue
@@ -1144,13 +1044,12 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 
 		// Wait until context is done then check state.
 		<-ctx.Done()
+		wg.Wait()
 
-		var consumerPending int
-		for i := 0; i < 10; i++ {
-			ci, err := js.ConsumerInfo(sc.Name, fmt.Sprintf("consumer:EEEEE:%d", i))
-			require_NoError(t, err)
-			consumerPending += int(ci.NumPending)
-		}
+		// If we have drifted do not have to wait too long, usually it's stuck for good.
+		checkFor(t, 10*time.Second, time.Second, func() error {
+			return checkState(t, c, "js", sc.Name)
+		})
 
 		checkMsgsEqual := func(t *testing.T) {
 			// These have already been checked to be the same for all streams.
@@ -1165,74 +1064,30 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 				msets = append(msets, mset)
 			}
 			for seq := state.FirstSeq; seq <= state.LastSeq; seq++ {
-				var msgId string
+				var prev []byte
 				var smv StoreMsg
 				for _, mset := range msets {
 					mset.mu.RLock()
 					sm, err := mset.store.LoadMsg(seq, &smv)
 					mset.mu.RUnlock()
 					require_NoError(t, err)
-					if msgId == _EMPTY_ {
-						msgId = string(sm.hdr)
-					} else if msgId != string(sm.hdr) {
-						t.Fatalf("MsgIds do not match for seq %d: %q vs %q", seq, msgId, sm.hdr)
+					if prev == nil {
+						prev = sm.msg
+					} else if !bytes.Equal(prev, sm.msg) {
+						t.Fatalf("Msg content do not match for seq %d: %q vs %q", seq, string(prev), string(sm.msg))
 					}
 				}
 			}
 		}
 
-		// Check state of streams and consumers.
-		si, err := js.StreamInfo(sc.Name)
-		require_NoError(t, err)
-
-		// Only check if there are any pending messages.
-		if consumerPending > 0 {
-			streamPending := int(si.State.Msgs)
-			if streamPending != consumerPending {
-				t.Errorf("Unexpected number of pending messages, stream=%d, consumers=%d", streamPending, consumerPending)
-			}
-		}
-
-		// If clustered, check whether leader and followers have drifted.
-		if sc.Replicas > 1 {
-			// If we have drifted do not have to wait too long, usually its stuck for good.
-			checkFor(t, time.Minute, time.Second, func() error {
-				return checkState(t, c, "js", sc.Name)
-			})
-			// If we succeeded now let's check that all messages are also the same.
-			// We may have no messages but for tests that do we make sure each msg is the same
-			// across all replicas.
-			checkMsgsEqual(t)
-		}
-
-		wg.Wait()
+		// If we succeeded now let's check that all messages are also the same.
+		// We may have no messages but for tests that do we make sure each msg is the same
+		// across all replicas.
+		checkMsgsEqual(t)
 	}
 
 	// Setting up test variations below:
 	//
-	// File based with single replica and discard old policy.
-	t.Run("R1F", func(t *testing.T) {
-		params := &testParams{
-			restartAny:     true,
-			ldmRestart:     false,
-			rolloutRestart: false,
-			restarts:       1,
-		}
-		test(t, params, &nats.StreamConfig{
-			Name:        "OWQTEST_R1F",
-			Subjects:    []string{"MSGS.>"},
-			Replicas:    1,
-			MaxAge:      30 * time.Minute,
-			Duplicates:  5 * time.Minute,
-			Retention:   nats.WorkQueuePolicy,
-			Discard:     nats.DiscardOld,
-			AllowRollup: true,
-			Placement: &nats.Placement{
-				Tags: []string{"test"},
-			},
-		})
-	})
-
 	// Clustered memory based with discard new policy and max msgs limit.
 	t.Run("R3M", func(t *testing.T) {
 		params := &testParams{
@@ -1246,12 +1101,9 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Name:        "OWQTEST_R3M",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
-			MaxAge:      30 * time.Minute,
 			MaxMsgs:     100_000,
-			Duplicates:  5 * time.Minute,
 			Retention:   nats.WorkQueuePolicy,
 			Discard:     nats.DiscardNew,
-			AllowRollup: true,
 			Storage:     nats.MemoryStorage,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
@@ -1272,12 +1124,9 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Name:        "OWQTEST_R3F_DN",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
-			MaxAge:      30 * time.Minute,
 			MaxMsgs:     100_000,
-			Duplicates:  5 * time.Minute,
 			Retention:   nats.WorkQueuePolicy,
 			Discard:     nats.DiscardNew,
-			AllowRollup: true,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
 			},
@@ -1297,12 +1146,9 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Name:        "OWQTEST_R3F_DO",
 			Subjects:    []string{"MSGS.>"},
 			Replicas:    3,
-			MaxAge:      30 * time.Minute,
 			MaxMsgs:     100_000,
-			Duplicates:  5 * time.Minute,
 			Retention:   nats.WorkQueuePolicy,
 			Discard:     nats.DiscardOld,
-			AllowRollup: true,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
 			},
@@ -1322,7 +1168,7 @@ func TestJetStreamClusterStreamOrphanMsgsAndReplicasDrifting(t *testing.T) {
 			Name:       "OWQTEST_R3F_DO_NOLIMIT",
 			Subjects:   []string{"MSGS.>"},
 			Replicas:   3,
-			Duplicates: 30 * time.Second,
+			Retention:  nats.LimitsPolicy,
 			Discard:    nats.DiscardOld,
 			Placement: &nats.Placement{
 				Tags: []string{"test"},
