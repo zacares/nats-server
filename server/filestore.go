@@ -67,6 +67,9 @@ type FileStoreConfig struct {
 	Cipher StoreCipher
 	// Compression is the algorithm to use when compressing.
 	Compression StoreCompression
+	// SkipStreamStateInterval is when stream state should not be written on an interval and only on graceful shutdown.
+	// This is only to be used by streams that have are constrained in size and are quick enough to recover during startup.
+	SkipStreamStateInterval bool
 
 	// Internal reference to our server.
 	srv *Server
@@ -8268,6 +8271,11 @@ const (
 func (fs *fileStore) flushStreamStateLoop(qch, done chan struct{}) {
 	// Signal we are done on exit.
 	defer close(done)
+
+	// Skip if we don't need to flush, immediately closes 'done' channel.
+	if fs.fcfg.SkipStreamStateInterval {
+		return
+	}
 
 	// Make sure we do not try to write these out too fast.
 	// Spread these out for large numbers on a server restart.
