@@ -67,6 +67,9 @@ type FileStoreConfig struct {
 	Cipher StoreCipher
 	// Compression is the algorithm to use when compressing.
 	Compression StoreCompression
+	// SkipStreamState is when stream state should not be written on an interval nor on graceful shutdown.
+	// This is only to be used by streams that are constrained in size and are quick enough to recover during startup.
+	SkipStreamState bool
 
 	// Internal reference to our server.
 	srv *Server
@@ -8269,6 +8272,11 @@ func (fs *fileStore) flushStreamStateLoop(qch, done chan struct{}) {
 	// Signal we are done on exit.
 	defer close(done)
 
+	// Skip if we don't need to flush, immediately closes 'done' channel.
+	if fs.fcfg.SkipStreamState {
+		return
+	}
+
 	// Make sure we do not try to write these out too fast.
 	// Spread these out for large numbers on a server restart.
 	const writeThreshold = 2 * time.Minute
@@ -8315,7 +8323,7 @@ func (fs *fileStore) forceWriteFullState() error {
 func (fs *fileStore) _writeFullState(force bool) error {
 	start := time.Now()
 	fs.mu.Lock()
-	if fs.closed || fs.dirty == 0 {
+	if fs.closed || fs.dirty == 0 || fs.fcfg.SkipStreamState {
 		fs.mu.Unlock()
 		return nil
 	}
