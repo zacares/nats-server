@@ -5022,7 +5022,7 @@ func TestFileStoreRecaluclateFirstForSubjBug(t *testing.T) {
 	fs.mu.RUnlock()
 
 	// Since we lazy update the first, simulate that we have not updated it as of yet.
-	ss := &SimpleState{Msgs: 1, First: 1, Last: 3, firstNeedsUpdate: true}
+	ss := &SimpleState{Msgs: 1, First: 1, Last: 3}
 
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
@@ -5033,7 +5033,7 @@ func TestFileStoreRecaluclateFirstForSubjBug(t *testing.T) {
 	// This will panic without the fix.
 	mb.recalculateFirstForSubj("foo", 1, ss)
 	// Make sure it was update properly.
-	require_True(t, *ss == SimpleState{Msgs: 1, First: 3, Last: 3, firstNeedsUpdate: false})
+	require_True(t, *ss == SimpleState{Msgs: 1, First: 3, Last: 3})
 }
 
 func TestFileStoreKeepWithDeletedMsgsBug(t *testing.T) {

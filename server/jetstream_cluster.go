@@ -2608,8 +2608,6 @@ func (js *jetStream) monitorStream(mset *stream, sa *streamAssignment, sendSnaps
 			if ne >= compactNumMin || nb > compactSizeMin || mset.getCLFS() > pclfs {
 				// We want to make sure we do not short circuit if transistioning from no clfs.
 				if pclfs == 0 {
-					// This is always false by default.
-					lastState.firstNeedsUpdate = true
 					lastSnapTime = time.Time{}
 				}
 				doSnapshot()
