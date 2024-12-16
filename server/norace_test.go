@@ -10880,17 +10880,20 @@ func TestNoRaceJetStreamStandaloneDontReplyToAckBeforeProcessingIt(t *testing.T)
 				defer wg.Done()
 				msgs, err := sub.Fetch(1)
 				if err != nil {
+					require_NoError(t, err)
 					errCh <- err
 					return
 				}
 				msg := msgs[0]
 				err = msg.AckSync()
 				if err != nil {
+					require_NoError(t, err)
 					errCh <- err
 					return
 				}
 				_, err = js.Publish(msg.Subject, []byte("hello"))
 				if err != nil {
+					require_NoError(t, err)
 					errCh <- err
 					return
 				}
