@@ -6984,6 +6984,57 @@ func TestJetStreamClusterDontSnapshotTooOften(t *testing.T) {
 	}
 }
 
+func TestJetStreamClusterPartialWriteTwoMsgBlocks(t *testing.T) {
+	c := createJetStreamClusterExplicit(t, "R3S", 3)
+	defer c.shutdown()
+
+	s := c.randomServer()
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+		Replicas: 3,
+		Storage:  nats.FileStorage,
+	})
+	require_NoError(t, err)
+
+	data := make([]byte, defaultSmallBlockSize)
+	_, err = crand.Read(data)
+	require_NoError(t, err)
+
+	for i := 0; i < 9; i++ {
+		_, err = js.Publish("foo", data)
+		require_NoError(t, err)
+	}
+	nc.Close()
+
+	sd := s.StoreDir()
+	s.Shutdown()
+	s.WaitForShutdown()
+
+	fn := filepath.Join(sd, globalAccountName, streamsDir, "TEST", msgDir, streamStreamStateFile)
+	err = os.Remove(fn)
+	require_NoError(t, err)
+	fn = filepath.Join(sd, globalAccountName, streamsDir, "TEST", msgDir, "1.blk")
+	fi, err := os.Stat(fn)
+	require_NoError(t, err)
+	err = os.Truncate(fn, fi.Size()-1)
+	require_NoError(t, err)
+
+	c.waitOnStreamLeader(globalAccountName, "TEST")
+	nc, js = jsClientConnect(t, c.streamLeader(globalAccountName, "TEST"))
+	defer nc.Close()
+	_, err = js.Publish("foo", data)
+	require_NoError(t, err)
+
+	s = c.restartServer(s)
+	checkFor(t, 10*time.Second, time.Second, func() error {
+		return checkState(t, c, globalAccountName, "TEST")
+	})
+}
+
 //
 // DO NOT ADD NEW TESTS IN THIS FILE (unless to balance test times)
 // Add at the end of jetstream_cluster_<n>_test.go, with <n> being the highest value.
