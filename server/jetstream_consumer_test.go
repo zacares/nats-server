@@ -2533,3 +2533,54 @@ func TestJetStreamConsumerBackoffWhenBackoffLengthIsEqualToMaxDeliverConfig(t *t
 	require_NoError(t, err)
 	require_LessThan(t, time.Since(firstMsgSent), calculateExpectedBackoff(3))
 }
+
+func TestJetStreamConsumerPendingCountGetsCorrected(t *testing.T) {
+	s := RunBasicJetStreamServer(t)
+	defer s.Shutdown()
+
+	nc, js := jsClientConnect(t, s)
+	defer nc.Close()
+
+	_, err := js.AddStream(&nats.StreamConfig{
+		Name:     "TEST",
+		Subjects: []string{"foo"},
+	})
+	require_NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		_, err = js.Publish("foo", nil)
+		require_NoError(t, err)
+	}
+
+	ci, err := js.AddConsumer("TEST", &nats.ConsumerConfig{Durable: "CONSUMER"})
+	require_NoError(t, err)
+	require_Equal(t, ci.NumPending, 5)
+
+	ci, err = js.ConsumerInfo("TEST", "CONSUMER")
+	require_NoError(t, err)
+	require_Equal(t, ci.NumPending, 5)
+
+	acc, err := s.lookupAccount(globalAccountName)
+	require_NoError(t, err)
+	mset, err := acc.lookupStream("TEST")
+	require_NoError(t, err)
+	o := mset.lookupConsumer("CONSUMER")
+	require_NotNil(t, o)
+
+	// Simulate the pending count being off and needing to be recalculated.
+	o.mu.Lock()
+	o.npc--
+	o.npcRec = time.Now().Add(-25*time.Second) // Shorten time until recalculation happens.
+	o.mu.Unlock()
+
+	checkFor(t, 10*time.Second, time.Second, func() error {
+		ci, err = js.ConsumerInfo("TEST", "CONSUMER")
+		if err != nil {
+			return err
+		}
+		if ci.NumPending != 5 {
+			return fmt.Errorf("expected NumPending=5, got %d", ci.NumPending)
+		}
+		return nil
+	})
+}

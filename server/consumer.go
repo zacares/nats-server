@@ -410,6 +410,7 @@ type consumer struct {
 	chkflr            uint64         // our check floor, interest streams only.
 	npc               int64          // Num Pending Count
 	npf               uint64         // Num Pending Floor Sequence
+	npcRec            time.Time      // Last time the Num Pending Count was recalculated.
 	dsubj             string
 	qgroup            string
 	lss               *lastSeqSkipList
@@ -4684,16 +4685,22 @@ func (o *consumer) setMaxPendingBytes(limit int) {
 // This does some quick sanity checks to see if we should re-calculate num pending.
 // Lock should be held.
 func (o *consumer) checkNumPending() uint64 {
+	npc := o.numPending()
 	if o.mset != nil {
 		var state StreamState
 		o.mset.store.FastState(&state)
-		npc := o.numPending()
 		if o.sseq > state.LastSeq && npc > 0 || npc > state.Msgs {
 			// Re-calculate.
-			o.streamNumPending()
+			return o.streamNumPending()
 		}
 	}
-	return o.numPending()
+	// Due to the aforementioned race, allow recalculation every once in a while.
+	if npc > 0 && time.Since(o.npcRec) > 30*time.Second {
+		// Re-calculate.
+		o.npcRec = time.Now()
+		return o.streamNumPending()
+	}
+	return npc
 }
 
 // Lock should be held.
