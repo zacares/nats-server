@@ -4060,7 +4060,7 @@ func (mset *stream) storeUpdates(md, bd int64, seq uint64, subj string) {
 		// Batch decrements we need to force consumers to re-calculate num pending.
 		mset.clsMu.RLock()
 		for _, o := range mset.cList {
-			o.streamNumPendingLocked()
+			o.streamNumPendingLocked(false)
 		}
 		mset.clsMu.RUnlock()
 	}
@@ -4521,7 +4521,7 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 	} else {
 		// This is a batch request, capture initial numPending.
 		isBatchRequest = true
-		np, validThrough = store.NumPending(seq, req.NextFor, false)
+		np, validThrough = store.NumPending(seq, req.NextFor, false, true)
 	}
 
 	// Grab MaxBytes
@@ -4610,7 +4610,7 @@ func (mset *stream) getDirectRequest(req *JSApiMsgGetRequest, reply string) {
 	if isBatchRequest {
 		// Update if the stream's lasts sequence has moved past our validThrough.
 		if mset.lastSeq() > validThrough {
-			np, _ = store.NumPending(seq, req.NextFor, false)
+			np, _ = store.NumPending(seq, req.NextFor, false, true)
 		}
 		hdr := fmt.Appendf(nil, eob, np, lseq)
 		mset.outq.send(newJSPubMsg(reply, _EMPTY_, _EMPTY_, hdr, nil, nil, 0))

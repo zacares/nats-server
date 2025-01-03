@@ -2996,9 +2996,11 @@ func (fs *fileStore) MultiLastSeqs(filters []string, maxSeq uint64, maxAllowed i
 
 // NumPending will return the number of pending messages matching the filter subject starting at sequence.
 // Optimized for stream num pending calculations for consumers.
-func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool) (total, validThrough uint64) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
+func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool, needLock bool) (total, validThrough uint64) {
+	if needLock {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+	}
 
 	// This can always be last for these purposes.
 	validThrough = fs.state.LastSeq
@@ -3292,9 +3294,11 @@ func (fs *fileStore) NumPending(sseq uint64, filter string, lastPerSubject bool)
 // NumPending will return the number of pending messages matching any subject in the sublist starting at sequence.
 // Optimized for stream num pending calculations for consumers with lots of filtered subjects.
 // Subjects should not overlap, this property is held when doing multi-filtered consumers.
-func (fs *fileStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bool) (total, validThrough uint64) {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
+func (fs *fileStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bool, needLock bool) (total, validThrough uint64) {
+	if needLock {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+	}
 
 	// This can always be last for these purposes.
 	validThrough = fs.state.LastSeq

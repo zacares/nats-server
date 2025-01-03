@@ -1376,7 +1376,7 @@ func (o *consumer) setLeader(isLeader bool) {
 		o.readStoredState(lseq)
 
 		// Setup initial num pending.
-		o.streamNumPending()
+		o.streamNumPending(true)
 
 		// Cleanup lss when we take over in clustered mode.
 		if o.hasSkipListPending() && o.sseq >= o.lss.resume {
@@ -2237,7 +2237,7 @@ func (o *consumer) updateConfig(cfg *ConsumerConfig) error {
 	}
 
 	// Re-calculate num pending on update.
-	o.streamNumPending()
+	o.streamNumPending(true)
 
 	return nil
 }
@@ -4690,7 +4690,7 @@ func (o *consumer) checkNumPending() uint64 {
 		npc := o.numPending()
 		if o.sseq > state.LastSeq && npc > 0 || npc > state.Msgs {
 			// Re-calculate.
-			o.streamNumPending()
+			o.streamNumPending(true)
 		}
 	}
 	return o.numPending()
@@ -4720,21 +4720,21 @@ func (o *consumer) checkNumPendingOnEOF() {
 }
 
 // Call into streamNumPending after acquiring the consumer lock.
-func (o *consumer) streamNumPendingLocked() uint64 {
+func (o *consumer) streamNumPendingLocked(needStoreLock bool) uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.streamNumPending()
+	return o.streamNumPending(needStoreLock)
 }
 
 // Will force a set from the stream store of num pending.
 // Depends on delivery policy, for last per subject we calculate differently.
 // Lock should be held.
-func (o *consumer) streamNumPending() uint64 {
+func (o *consumer) streamNumPending(needStoreLock bool) uint64 {
 	if o.mset == nil || o.mset.store == nil {
 		o.npc, o.npf = 0, 0
 		return 0
 	}
-	npc, npf := o.calculateNumPending()
+	npc, npf := o.calculateNumPending(needStoreLock)
 	o.npc, o.npf = int64(npc), npf
 	return o.numPending()
 }
@@ -4742,7 +4742,7 @@ func (o *consumer) streamNumPending() uint64 {
 // Will calculate num pending but only requires a read lock.
 // Depends on delivery policy, for last per subject we calculate differently.
 // At least RLock should be held.
-func (o *consumer) calculateNumPending() (npc, npf uint64) {
+func (o *consumer) calculateNumPending(needStoreLock bool) (npc, npf uint64) {
 	if o.mset == nil || o.mset.store == nil {
 		return 0, 0
 	}
@@ -4751,12 +4751,12 @@ func (o *consumer) calculateNumPending() (npc, npf uint64) {
 	filters, subjf := o.filters, o.subjf
 
 	if filters != nil {
-		return o.mset.store.NumPendingMulti(o.sseq, filters, isLastPerSubject)
+		return o.mset.store.NumPendingMulti(o.sseq, filters, isLastPerSubject, needStoreLock)
 	} else if len(subjf) > 0 {
 		filter := subjf[0].subject
-		return o.mset.store.NumPending(o.sseq, filter, isLastPerSubject)
+		return o.mset.store.NumPending(o.sseq, filter, isLastPerSubject, needStoreLock)
 	}
-	return o.mset.store.NumPending(o.sseq, _EMPTY_, isLastPerSubject)
+	return o.mset.store.NumPending(o.sseq, _EMPTY_, isLastPerSubject, needStoreLock)
 }
 
 func convertToHeadersOnly(pmsg *jsPubMsg) {

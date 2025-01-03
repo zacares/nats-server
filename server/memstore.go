@@ -676,24 +676,28 @@ func (ms *memStore) SubjectsTotals(filterSubject string) map[string]uint64 {
 }
 
 // NumPending will return the number of pending messages matching the filter subject starting at sequence.
-func (ms *memStore) NumPending(sseq uint64, filter string, lastPerSubject bool) (total, validThrough uint64) {
+func (ms *memStore) NumPending(sseq uint64, filter string, lastPerSubject bool, needLock bool) (total, validThrough uint64) {
 	// This needs to be a write lock, as filteredStateLocked can mutate the per-subject state.
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
+	if needLock {
+		ms.mu.Lock()
+		defer ms.mu.Unlock()
+	}
 
 	ss := ms.filteredStateLocked(sseq, filter, lastPerSubject)
 	return ss.Msgs, ms.state.LastSeq
 }
 
 // NumPending will return the number of pending messages matching any subject in the sublist starting at sequence.
-func (ms *memStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bool) (total, validThrough uint64) {
+func (ms *memStore) NumPendingMulti(sseq uint64, sl *Sublist, lastPerSubject bool, needLock bool) (total, validThrough uint64) {
 	if sl == nil {
-		return ms.NumPending(sseq, fwcs, lastPerSubject)
+		return ms.NumPending(sseq, fwcs, lastPerSubject, needLock)
 	}
 
 	// This needs to be a write lock, as we can mutate the per-subject state.
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
+	if needLock {
+		ms.mu.Lock()
+		defer ms.mu.Unlock()
+	}
 
 	var ss SimpleState
 	if sseq < ms.state.FirstSeq {
