@@ -3879,8 +3879,8 @@ func (fs *fileStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 // StoreRawMsg stores a raw message with expected sequence number and timestamp.
 func (fs *fileStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, ttl int64) error {
 	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	err := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl)
-	cb := fs.scb
 	// Check if first message timestamp requires expiry
 	// sooner than initial replica expiry timer set to MaxAge when initializing.
 	if !fs.receivedAny && fs.cfg.MaxAge != 0 && ts > 0 {
@@ -3889,10 +3889,9 @@ func (fs *fileStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 		// Instead, set short timeout.
 		fs.resetAgeChk(int64(time.Millisecond * 50))
 	}
-	fs.mu.Unlock()
 
-	if err == nil && cb != nil {
-		cb(1, int64(fileStoreMsgSize(subj, hdr, msg)), seq, subj)
+	if err == nil && fs.scb != nil {
+		fs.scb(1, int64(fileStoreMsgSize(subj, hdr, msg)), seq, subj)
 	}
 
 	return err
@@ -3901,15 +3900,14 @@ func (fs *fileStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, t
 // Store stores a message. We hold the main filestore lock for any write operation.
 func (fs *fileStore) StoreMsg(subj string, hdr, msg []byte, ttl int64) (uint64, int64, error) {
 	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	seq, ts := fs.state.LastSeq+1, time.Now().UnixNano()
 	err := fs.storeRawMsg(subj, hdr, msg, seq, ts, ttl)
-	cb := fs.scb
-	fs.mu.Unlock()
 
 	if err != nil {
 		seq, ts = 0, 0
-	} else if cb != nil {
-		cb(1, int64(fileStoreMsgSize(subj, hdr, msg)), seq, subj)
+	} else if fs.scb != nil {
+		fs.scb(1, int64(fileStoreMsgSize(subj, hdr, msg)), seq, subj)
 	}
 
 	return seq, ts, err
@@ -4525,8 +4523,6 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 	}
 
 	if cb := fs.scb; cb != nil {
-		// If we have a callback registered we need to release lock regardless since cb might need it to lookup msg, etc.
-		fs.mu.Unlock()
 		// Storage updates.
 		var subj string
 		if sm != nil {
@@ -4534,10 +4530,6 @@ func (fs *fileStore) removeMsg(seq uint64, secure, viaLimits, needFSLock bool) (
 		}
 		delta := int64(msz)
 		cb(-1, -delta, seq, subj)
-
-		if !needFSLock {
-			fs.mu.Lock()
-		}
 	} else if needFSLock {
 		// We acquired it so release it.
 		fs.mu.Unlock()
@@ -7386,6 +7378,7 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 	var tombs []msgId
 
 	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	// We may remove blocks as we purge, so don't range directly on fs.blks
 	// otherwise we may jump over some (see https://github.com/nats-io/nats-server/issues/3528)
 	for i := 0; i < len(fs.blks); i++ {
@@ -7491,11 +7484,9 @@ func (fs *fileStore) PurgeEx(subject string, sequence, keep uint64) (purged uint
 
 	os.Remove(filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile))
 	fs.dirty++
-	cb := fs.scb
-	fs.mu.Unlock()
 
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	if fs.scb != nil {
+		fs.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return purged, nil
@@ -7585,16 +7576,15 @@ func (fs *fileStore) purge(fseq uint64) (uint64, error) {
 		fs.writeTombstone(lseq, lmb.last.ts)
 	}
 
-	cb := fs.scb
+	if fs.scb != nil {
+		fs.scb(-int64(purged), -rbytes, 0, _EMPTY_)
+	}
+
 	fs.mu.Unlock()
 
 	// Force a new index.db to be written.
 	if purged > 0 {
 		fs.forceWriteFullState()
-	}
-
-	if cb != nil {
-		cb(-int64(purged), -rbytes, 0, _EMPTY_)
 	}
 
 	return purged, nil
@@ -7792,16 +7782,15 @@ SKIP:
 	os.Remove(filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile))
 	fs.dirty++
 
-	cb := fs.scb
+	if fs.scb != nil && purged > 0 {
+		fs.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	}
+
 	fs.mu.Unlock()
 
 	// Force a new index.db to be written.
 	if purged > 0 {
 		fs.forceWriteFullState()
-	}
-
-	if cb != nil && purged > 0 {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return purged, err
@@ -7810,17 +7799,15 @@ SKIP:
 // Will completely reset our store.
 func (fs *fileStore) reset() error {
 	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	if fs.closed {
-		fs.mu.Unlock()
 		return ErrStoreClosed
 	}
 	if fs.sips > 0 {
-		fs.mu.Unlock()
 		return ErrStoreSnapshotInProgress
 	}
 
 	var purged, bytes uint64
-	cb := fs.scb
 
 	for _, mb := range fs.blks {
 		mb.mu.Lock()
@@ -7851,10 +7838,8 @@ func (fs *fileStore) reset() error {
 		fs.dirty++
 	}
 
-	fs.mu.Unlock()
-
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	if fs.scb != nil {
+		fs.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return nil
@@ -7995,16 +7980,15 @@ func (fs *fileStore) Truncate(seq uint64) error {
 	os.Remove(filepath.Join(fs.fcfg.StoreDir, msgDir, streamStreamStateFile))
 	fs.dirty++
 
-	cb := fs.scb
+	if fs.scb != nil {
+		fs.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	}
+
 	fs.mu.Unlock()
 
 	// Force a new index.db to be written.
 	if purged > 0 {
 		fs.forceWriteFullState()
-	}
-
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return nil
@@ -8411,10 +8395,10 @@ func (fs *fileStore) Delete() error {
 		cb, msgs, bytes := fs.scb, int64(fs.state.Msgs), int64(fs.state.Bytes)
 		// Guard against double accounting if called twice.
 		fs.state.Msgs, fs.state.Bytes = 0, 0
-		fs.mu.Unlock()
 		if msgs > 0 && cb != nil {
 			cb(-msgs, -bytes, 0, _EMPTY_)
 		}
+		fs.mu.Unlock()
 		return ErrStoreClosed
 	}
 
@@ -8434,12 +8418,12 @@ func (fs *fileStore) Delete() error {
 	dbytes := int64(fs.state.Bytes)
 	fs.state.Msgs, fs.state.Bytes = 0, 0
 	fs.blks = nil
-	cb := fs.scb
-	fs.mu.Unlock()
 
-	if cb != nil {
-		cb(-int64(dmsgs), -dbytes, 0, _EMPTY_)
+	if fs.scb != nil {
+		fs.scb(-int64(dmsgs), -dbytes, 0, _EMPTY_)
 	}
+
+	fs.mu.Unlock()
 
 	if err := fs.stop(true, false); err != nil {
 		return err
@@ -8809,6 +8793,9 @@ func (fs *fileStore) stop(delete, writeState bool) error {
 
 	// We should update the upper usage layer on a stop.
 	cb, bytes := fs.scb, int64(fs.state.Bytes)
+	if bytes > 0 && cb != nil {
+		cb(0, -bytes, 0, _EMPTY_)
+	}
 	fs.mu.Unlock()
 
 	fs.cmu.Lock()
@@ -8823,10 +8810,6 @@ func (fs *fileStore) stop(delete, writeState bool) error {
 		} else {
 			o.Stop()
 		}
-	}
-
-	if bytes > 0 && cb != nil {
-		cb(0, -bytes, 0, _EMPTY_)
 	}
 
 	return nil

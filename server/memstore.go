@@ -220,8 +220,8 @@ func (ms *memStore) storeRawMsg(subj string, hdr, msg []byte, seq uint64, ts, tt
 // StoreRawMsg stores a raw message with expected sequence number and timestamp.
 func (ms *memStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, ttl int64) error {
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	err := ms.storeRawMsg(subj, hdr, msg, seq, ts, ttl)
-	cb := ms.scb
 	// Check if first message timestamp requires expiry
 	// sooner than initial replica expiry timer set to MaxAge when initializing.
 	if !ms.receivedAny && ms.cfg.MaxAge != 0 && ts > 0 {
@@ -229,10 +229,9 @@ func (ms *memStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, tt
 		// Calculate duration when the next expireMsgs should be called.
 		ms.resetAgeChk(int64(time.Millisecond) * 50)
 	}
-	ms.mu.Unlock()
 
-	if err == nil && cb != nil {
-		cb(1, int64(memStoreMsgSize(subj, hdr, msg)), seq, subj)
+	if err == nil && ms.scb != nil {
+		ms.scb(1, int64(memStoreMsgSize(subj, hdr, msg)), seq, subj)
 	}
 
 	return err
@@ -241,15 +240,14 @@ func (ms *memStore) StoreRawMsg(subj string, hdr, msg []byte, seq uint64, ts, tt
 // Store stores a message.
 func (ms *memStore) StoreMsg(subj string, hdr, msg []byte, ttl int64) (uint64, int64, error) {
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	seq, ts := ms.state.LastSeq+1, time.Now().UnixNano()
 	err := ms.storeRawMsg(subj, hdr, msg, seq, ts, ttl)
-	cb := ms.scb
-	ms.mu.Unlock()
 
 	if err != nil {
 		seq, ts = 0, 0
-	} else if cb != nil {
-		cb(1, int64(memStoreMsgSize(subj, hdr, msg)), seq, subj)
+	} else if ms.scb != nil {
+		ms.scb(1, int64(memStoreMsgSize(subj, hdr, msg)), seq, subj)
 	}
 
 	return seq, ts, err
@@ -1009,11 +1007,10 @@ func (ms *memStore) Purge() (uint64, error) {
 
 func (ms *memStore) purge(fseq uint64) (uint64, error) {
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	purged := uint64(len(ms.msgs))
-	cb := ms.scb
 	bytes := int64(ms.state.Bytes)
 	if fseq < ms.state.LastSeq {
-		ms.mu.Unlock()
 		return 0, fmt.Errorf("partial purges not supported on memory store")
 	}
 	ms.state.FirstSeq = fseq
@@ -1023,10 +1020,9 @@ func (ms *memStore) purge(fseq uint64) (uint64, error) {
 	ms.state.Msgs = 0
 	ms.msgs = make(map[uint64]*StoreMsg)
 	ms.fss = stree.NewSubjectTree[SimpleState]()
-	ms.mu.Unlock()
 
-	if cb != nil {
-		cb(-int64(purged), -bytes, 0, _EMPTY_)
+	if ms.scb != nil {
+		ms.scb(-int64(purged), -bytes, 0, _EMPTY_)
 	}
 
 	return purged, nil
@@ -1043,7 +1039,7 @@ func (ms *memStore) Compact(seq uint64) (uint64, error) {
 	var purged, bytes uint64
 
 	ms.mu.Lock()
-	cb := ms.scb
+	defer ms.mu.Unlock()
 	if seq <= ms.state.LastSeq {
 		fseq := ms.state.FirstSeq
 		// Determine new first sequence.
@@ -1085,10 +1081,9 @@ func (ms *memStore) Compact(seq uint64) (uint64, error) {
 		ms.msgs = make(map[uint64]*StoreMsg)
 		ms.fss = stree.NewSubjectTree[SimpleState]()
 	}
-	ms.mu.Unlock()
 
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	if ms.scb != nil {
+		ms.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return purged, nil
@@ -1096,11 +1091,10 @@ func (ms *memStore) Compact(seq uint64) (uint64, error) {
 
 // Will completely reset our store.
 func (ms *memStore) reset() error {
-
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	var purged, bytes uint64
-	cb := ms.scb
-	if cb != nil {
+	if ms.scb != nil {
 		for _, sm := range ms.msgs {
 			purged++
 			bytes += memStoreMsgSize(sm.subj, sm.hdr, sm.msg)
@@ -1119,10 +1113,8 @@ func (ms *memStore) reset() error {
 	ms.msgs = make(map[uint64]*StoreMsg)
 	ms.fss = stree.NewSubjectTree[SimpleState]()
 
-	ms.mu.Unlock()
-
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	if ms.scb != nil {
+		ms.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return nil
@@ -1138,9 +1130,9 @@ func (ms *memStore) Truncate(seq uint64) error {
 	var purged, bytes uint64
 
 	ms.mu.Lock()
+	defer ms.mu.Unlock()
 	lsm, ok := ms.msgs[seq]
 	if !ok {
-		ms.mu.Unlock()
 		return ErrInvalidSequence
 	}
 
@@ -1166,11 +1158,8 @@ func (ms *memStore) Truncate(seq uint64) error {
 	}
 	ms.state.Bytes -= bytes
 
-	cb := ms.scb
-	ms.mu.Unlock()
-
-	if cb != nil {
-		cb(-int64(purged), -int64(bytes), 0, _EMPTY_)
+	if ms.scb != nil {
+		ms.scb(-int64(purged), -int64(bytes), 0, _EMPTY_)
 	}
 
 	return nil
@@ -1495,11 +1484,8 @@ func (ms *memStore) removeMsg(seq uint64, secure bool) bool {
 	delete(ms.msgs, seq)
 
 	if ms.scb != nil {
-		// We do not want to hold any locks here.
-		ms.mu.Unlock()
 		delta := int64(ss)
 		ms.scb(-1, -delta, seq, sm.subj)
-		ms.mu.Lock()
 	}
 
 	return ok
